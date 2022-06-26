@@ -17,7 +17,7 @@
 package gop
 
 import (
-	"errors"
+	"fmt"
 	"go/token"
 	"go/types"
 	"io/fs"
@@ -32,6 +32,7 @@ import (
 	"github.com/goplus/gox"
 	"github.com/goplus/mod/env"
 	"github.com/goplus/mod/gopmod"
+	"github.com/qiniu/x/errors"
 )
 
 type Config struct {
@@ -46,18 +47,27 @@ type Config struct {
 
 // -----------------------------------------------------------------------------
 
+func NotFound(err error) bool {
+	return errors.Err(err) == syscall.ENOENT
+}
+
 func loadMod(dir string, gop *env.Gop, conf *Config) (mod *gopmod.Module, err error) {
 	mod, err = gopmod.Load(dir, 0)
-	if err != nil && err != syscall.ENOENT {
+	if err != nil && !NotFound(err) {
+		err = errors.NewWith(err, `gopmod.Load(dir, 0`, -2, "gopmod.Load", dir, 0)
 		return
 	}
 	if mod != nil {
 		err = mod.RegisterClasses()
 		if err != nil {
+			err = errors.NewWith(err, `mod.RegisterClasses()`, -2, "(*gopmod.Module).RegisterClasses", mod)
 			return
 		}
 		if !conf.DontUpdateGoMod {
 			err = mod.UpdateGoMod(gop, !conf.DontCheckModChanged)
+			if err != nil {
+				err = errors.NewWith(err, `mod.UpdateGoMod(gop, !conf.DontCheckModChanged)`, -2, "(*gopmod.Module).UpdateGoMod", mod, gop, !conf.DontCheckModChanged)
+			}
 		}
 		return
 	}
@@ -79,7 +89,7 @@ func lookupPub(mod *gopmod.Module) func(pkgPath string) (pubfile string, err err
 
 // -----------------------------------------------------------------------------
 
-func LoadDir(dir string, conf *Config, genTestPkg bool) (out, test *gox.Package, err error) {
+func LoadDir(dir string, conf *Config, genTestPkg bool, promptGenGo ...bool) (out, test *gox.Package, err error) {
 	if conf == nil {
 		conf = new(Config)
 	}
@@ -103,6 +113,13 @@ func LoadDir(dir string, conf *Config, genTestPkg bool) (out, test *gox.Package,
 	})
 	if err != nil {
 		return
+	}
+	if len(pkgs) == 0 {
+		return nil, nil, syscall.ENOENT
+	}
+
+	if promptGenGo != nil && promptGenGo[0] {
+		fmt.Printf("GenGo %v ...\n", dir)
 	}
 
 	imp := conf.Importer
@@ -162,27 +179,34 @@ func LoadFiles(files []string, conf *Config) (out *gox.Package, err error) {
 	}
 	mod, err := loadMod("", gop, conf)
 	if err != nil {
+		err = errors.NewWith(err, `loadMod("", gop, conf)`, -2, "gop.loadMod", "", gop, conf)
 		return
 	}
 
 	pkgs, err := parser.ParseFiles(fset, files, parser.ParseComments)
 	if err != nil {
+		err = errors.NewWith(err, `parser.ParseFiles(fset, files, parser.ParseComments)`, -2, "parser.ParseFiles", fset, files, parser.ParseComments)
 		return
 	}
 	if len(pkgs) != 1 {
-		return nil, errMultiPackges
+		err = errors.NewWith(errMultiPackges, `len(pkgs) != 1`, -1, "!=", len(pkgs), 1)
+		return
 	}
 	for _, pkg := range pkgs {
 		imp := conf.Importer
 		if imp == nil {
 			imp = NewImporter(mod, gop, fset)
 		}
-		out, err = cl.NewPackage("", pkg, &cl.Config{
+		clConf := &cl.Config{
 			Fset:        fset,
 			Importer:    imp,
 			LookupClass: mod.LookupClass,
 			LookupPub:   lookupPub(mod),
-		})
+		}
+		out, err = cl.NewPackage("", pkg, clConf)
+		if err != nil {
+			err = errors.NewWith(err, `cl.NewPackage("", pkg, clConf)`, -2, "cl.NewPackage", "", pkg, clConf)
+		}
 		break
 	}
 	return

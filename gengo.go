@@ -17,7 +17,6 @@
 package gop
 
 import (
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -27,6 +26,7 @@ import (
 	"github.com/goplus/mod/gopmod"
 	"github.com/goplus/mod/modcache"
 	"github.com/goplus/mod/modfetch"
+	"github.com/qiniu/x/errors"
 )
 
 const (
@@ -48,49 +48,55 @@ func GenGo(dir string, conf *Config, genTestPkg bool) (string, bool, error) {
 
 func genGoDir(dir string, conf *Config, genTestPkg, recursively bool) (err error) {
 	if recursively {
-		return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		var list errors.List
+		fn := func(path string, d fs.DirEntry, err error) error {
 			if err == nil && d.IsDir() {
 				if strings.HasPrefix(d.Name(), "_") { // skip _
 					return filepath.SkipDir
 				}
-				err = genGoIn(path, conf, genTestPkg, true)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, err)
+				if e := genGoIn(path, conf, genTestPkg, true); e != nil {
+					list.Add(e)
 				}
 			}
 			return err
-		})
+		}
+		err = filepath.WalkDir(dir, fn)
+		if err != nil {
+			return errors.NewWith(err, `filepath.WalkDir(dir, fn)`, -2, "filepath.WalkDir", dir, fn)
+		}
+		return list.ToError()
 	}
 	return genGoIn(dir, conf, genTestPkg, false)
 }
 
 func genGoIn(dir string, conf *Config, genTestPkg, prompt bool) (err error) {
-	out, test, err := LoadDir(dir, conf, genTestPkg)
+	out, test, err := LoadDir(dir, conf, genTestPkg, prompt)
 	if err != nil {
 		if err == syscall.ENOENT { // no Go+ source files
 			return nil
 		}
-		return
-	}
-
-	if prompt {
-		fmt.Printf("GenGo %v ...\n", dir)
+		return errors.NewWith(err, `LoadDir(dir, conf, genTestPkg, prompt)`, -5, "gop.LoadDir", dir, conf, genTestPkg, prompt)
 	}
 
 	os.MkdirAll(dir, 0755)
 	file := filepath.Join(dir, autoGenFile)
 	err = out.WriteFile(file)
 	if err != nil {
-		return
+		return errors.NewWith(err, `out.WriteFile(file)`, -2, "(*gox.Package).WriteFile", out, file)
 	}
 
-	err = out.WriteFile(filepath.Join(dir, autoGenTestFile), testingGoFile)
+	testFile := filepath.Join(dir, autoGenTestFile)
+	err = out.WriteFile(testFile, testingGoFile)
 	if err != nil && err != syscall.ENOENT {
-		return
+		return errors.NewWith(err, `out.WriteFile(testFile, testingGoFile)`, -2, "(*gox.Package).WriteFile", out, testFile, testingGoFile)
 	}
 
 	if test != nil {
-		err = test.WriteFile(filepath.Join(dir, autoGen2TestFile), testingGoFile)
+		testFile = filepath.Join(dir, autoGen2TestFile)
+		err = test.WriteFile(testFile, testingGoFile)
+		if err != nil {
+			return errors.NewWith(err, `test.WriteFile(testFile, testingGoFile)`, -2, "(*gox.Package).WriteFile", test, testFile, testingGoFile)
+		}
 	} else {
 		err = nil
 	}
@@ -111,7 +117,7 @@ func GenGoPkgPath(workDir, pkgPath string, conf *Config, allowExtern bool) (loca
 	}
 
 	mod, err := gopmod.Load(workDir, 0)
-	if err == syscall.ENOENT && allowExtern {
+	if NotFound(err) && allowExtern {
 		remotePkgPathDo(pkgPath, func(dir string) {
 			os.Chmod(dir, modWritable)
 			defer os.Chmod(dir, modReadonly)
@@ -164,10 +170,14 @@ func GenGoFiles(autogen string, files []string, conf *Config) (result []string, 
 	}
 	out, err := LoadFiles(files, conf)
 	if err != nil {
+		err = errors.NewWith(err, `LoadFiles(files, conf)`, -2, "gop.LoadFiles", files, conf)
 		return
 	}
 	result = append(result, autogen)
 	err = out.WriteFile(autogen)
+	if err != nil {
+		err = errors.NewWith(err, `out.WriteFile(autogen)`, -2, "(*gox.Package).WriteFile", out, autogen)
+	}
 	return
 }
 

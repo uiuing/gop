@@ -18,7 +18,6 @@
 package cl
 
 import (
-	"errors"
 	"fmt"
 	"go/types"
 	"log"
@@ -32,6 +31,7 @@ import (
 	"github.com/goplus/gox"
 	"github.com/goplus/gox/cpackages"
 	"github.com/goplus/mod/modfile"
+	"github.com/qiniu/x/errors"
 )
 
 const (
@@ -56,18 +56,6 @@ func SetDisableRecover(disableRecover bool) {
 func SetDebug(flags int) {
 	debugLoad = (flags & DbgFlagLoad) != 0
 	debugLookup = (flags & DbgFlagLookup) != 0
-}
-
-type Errors struct {
-	Errs []error
-}
-
-func (p *Errors) Error() string {
-	msgs := make([]string, len(p.Errs))
-	for i, err := range p.Errs {
-		msgs[i] = err.Error()
-	}
-	return strings.Join(msgs, "\n")
 }
 
 // -----------------------------------------------------------------------------
@@ -254,7 +242,7 @@ type pkgCtx struct {
 	syms  map[string]loader
 	inits []func()
 	tylds []*typeLoader
-	errs  []error
+	errs  errors.List
 }
 
 type blockCtx struct {
@@ -308,10 +296,7 @@ func (p *pkgCtx) loadNamed(at *gox.Package, t *types.Named) {
 }
 
 func (p *pkgCtx) complete() error {
-	if p.errs != nil {
-		return &Errors{Errs: p.errs}
-	}
-	return nil
+	return p.errs.ToError()
 }
 
 func (p *pkgCtx) loadType(name string) {
@@ -388,13 +373,21 @@ func NewPackage(pkgPath string, pkg *ast.Package, conf *Config) (p *gox.Package,
 		DefaultGoFile:   defaultGoFile,
 		NoSkipConstant:  conf.NoSkipConstant,
 	}
+	if enableRecover {
+		defer func() {
+			if e := recover(); e != nil {
+				ctx.handleRecover(e)
+				err = ctx.errs.ToError()
+			}
+		}()
+	}
 	p = gox.NewPackage(pkgPath, pkg.Name, confGox)
 	ctx.cpkgs = cpackages.NewImporter(&cpackages.Config{
 		Pkg: p, LookupPub: conf.LookupPub,
 	})
 	for file, gmx := range files {
 		if gmx.IsProj {
-			ctx.gmxSettings = newGmx(p, file, conf)
+			ctx.gmxSettings = newGmx(ctx, p, file, conf)
 			break
 		}
 	}
@@ -1043,7 +1036,7 @@ func loadVars(ctx *blockCtx, v *ast.ValueSpec, global bool) {
 	if nv := len(v.Values); nv > 0 {
 		cb := varDecl.InitStart(ctx.pkg)
 		if nv == 1 && len(names) == 2 {
-			compileExpr(ctx, v.Values[0], true)
+			compileExpr(ctx, v.Values[0], clCallWithTwoValue)
 		} else {
 			for _, val := range v.Values {
 				switch e := val.(type) {
